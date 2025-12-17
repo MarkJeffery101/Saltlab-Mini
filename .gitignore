@@ -15,6 +15,25 @@ embeddings.faiss.ids
 reports/
 manuals/
 
+# --- Test artifacts ---
+test_*.db
+*.sqlite
+*.sqlite3
+
+# --- Build / dist ---
+build/
+dist/
+*.spec
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Archives / exports ---
+*.zip
+*.tar
+*.gz
+
 # --- OS / editor ---
 .DS_Store
 Thumbs.db
