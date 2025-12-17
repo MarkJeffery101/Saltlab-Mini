@@ -1,0 +1,12 @@
+openai>=1.0.0
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+
+# Optional: for building standalone executable
+pyinstaller>=5.0
+
+# Note: tkinter is required for the GUI but comes with Python by default.
+# On some Linux systems, you may need to install it separately:
+#   Ubuntu/Debian: sudo apt-get install python3-tk
+#   Fedora: sudo dnf install python3-tkinter
+#   Arch: sudo pacman -S tk

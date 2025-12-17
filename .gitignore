@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# --- Local DB / indexes / outputs (do NOT commit) ---
+db.json
+manual_data.db
+embeddings.faiss
+embeddings.faiss.ids
+reports/
+manuals/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Secrets ---
+.env
+*.key

@@ -1,0 +1,225 @@
+Here’s the best Phase 2 for the backend based on what you have now (working ingest/show/ask/gap), focusing on ingestion + filtering + retrieval quality, and adding one or two high-value new functions (exams/model answers) without breaking anything.
+
+Phase 2 Backend Improvements (highest ROI, lowest “break risk”)
+1) Make ingestion deterministic, explainable, and auditable
+
+Problem today: ingestion changes cause chunk counts to swing and you don’t know exactly why; regressions happen silently.
+
+Do:
+
+Add --run-id logging: every ingest creates reports/ingest_<date>_<time>.json
+
+per file: original chars, cleaned chars, chunk count before/after filters
+
+counts of dropped items by reason: toc, noise_only, short, unanchored, etc.
+
+Add a “ingest stats” CLI:
+
+python manual_core.py ingest_report --last
+
+prints a simple table of what changed
+
+Definition of done: you can answer “why did chunks drop from 1465 to 1158?” in 10 seconds.
+
+2) Store chunks in 2 layers: “raw chunk” + “clean chunk”
+
+Problem today: you’re removing noise sometimes by dropping chunks entirely; other times you want to preserve content but remove the footer lines inside it.
+
+Do:
+
+For each chunk store:
+
+text_raw (as chunked)
+
+text_clean (noise lines removed)
+
+Use text_clean for embeddings and retrieval.
+
+Use text_raw for display if you want, but default to clean.
+
+Why this matters: You stop losing important content just because one footer line got appended.
+
+3) Hard rules for front matter + TOC
+
+You already improved this, but make it bulletproof.
+
+Do:
+
+Detect TOC/index chunks and mark them:
+
+chunk_type = toc | content | header | footer | unknown
+
+Don’t embed TOC by default.
+
+Keep TOC stored (optional) so later the UI can show structure or quick navigation.
+
+Definition of done: no chunk like Table of Contents ... dotted leaders ... ever gets embedded.
+
+4) Retrieval “Balanced multi-manual” (fix the “one manual dominates” issue)
+
+Problem today: when you ask across multiple selected docs, the top-k tends to come from one document with the closest embedding match. That’s why your answers seem to ignore the rest.
+
+Do: Add retrieval modes
+
+--mode global (current): top_k overall
+
+--mode balanced (new default when multiple manuals selected):
+
+allocate top_k_per_doc = max(2, top_k // N_docs)
+
+retrieve top per doc
+
+merge, then rerank (optional)
+
+Definition of done: if you select 5 manuals, the sources list normally includes at least some from each (where relevant exists).
+
+5) Add a rerank step (cheap, huge quality gain)
+
+Problem today: embedding similarity is decent but not enough for “needle in haystack” tables/procedures.
+
+Do:
+
+Stage 1: retrieve large set (e.g. top 80 by cosine)
+
+Stage 2: rerank those 80 using a cheap model (or even keyword scoring first)
+
+simplest backend-only approach:
+
+keyword overlap score + heading/path boosts
+
+better:
+
+LLM rerank prompt: “Which of these excerpts directly answers the question? Return top 12 IDs”
+
+Stage 3: send only reranked top 12 to the final answer call
+
+Definition of done: fewer “generic” answers; tables and specifics get found more often without blowing tokens.
+
+6) Filtering knobs that don’t destroy data
+
+Right now filtering can be too aggressive or inconsistent.
+
+Do:
+
+Add CLI options:
+
+--min-chars 40
+
+--keep-short-under-heading (true/false)
+
+--noise-strictness 1-3
+
+Add “do not drop” rules:
+
+If a chunk has a valid heading/path and contains key tokens (numbers + units + oxygen + depth + minutes etc.), keep it even if short.
+
+Definition of done: chunk count variations become controlled, not random.
+
+7) Cross-manual “answer with coverage” output
+
+Problem today: even if retrieval pulls from multiple docs, the final answer may ignore them.
+
+Do:
+
+Change the ask prompt slightly:
+
+“When multiple manuals are included, answer in sections per manual if applicable.”
+
+“If a manual has no relevant sources, explicitly state that.”
+
+Definition of done: output clearly shows what each manual says (or doesn’t).
+
+Phase 2 New Functions (worth adding now)
+Function A: “Exam Builder” (your training/exams/model answers)
+
+Command:
+python manual_core.py exam --include "Annexe A" "Nitrox" --topic "Deck Decompression Chamber operation" --n 10
+
+What it does:
+
+Retrieves best chunks on the topic (balanced mode)
+
+Generates:
+
+10 questions (mix: short answer, scenario, multiple choice)
+
+Model answers
+
+Evidence list (chunk IDs + heading/path)
+
+Exports to reports/exam_<topic>_<date>.html and .txt
+
+Why this is safe to add: it reuses your ask pipeline + retrieval; minimal new moving parts.
+
+Function B: “Module Builder” (mini version of your “merge manuals into one subject” goal)
+
+Command:
+python manual_core.py module --include "Annexe A" "Diving Ops" --topic "Bailout" --out reports/bailout_module.html
+
+What it does:
+
+Pulls all relevant chunks across selected manuals
+
+Dedupes (simple similarity or exact-text dedupe)
+
+Outputs a consolidated “module” with:
+
+headings
+
+combined procedure content
+
+citations to chunk IDs
+
+This becomes your bridge to the full “knowledge base manual builder” later.
+
+Phase 2 deliverable list (what you actually implement)
+
+Ingest logging report (why chunks dropped, per manual)
+
+Store text_clean + text_raw
+
+Chunk typing: content/toc/noise + don’t embed TOC
+
+Retrieval mode: balanced + global
+
+Rerank stage (keyword or LLM rerank)
+
+Ask output “per manual coverage”
+
+New command: exam
+
+Optional: new command: module
+
+The order I’d do it (to avoid regressions)
+
+Ingest reporting (so you can see what changes did)
+
+text_clean + chunk typing
+
+balanced retrieval
+
+rerank
+
+exam builder
+
+module builder
+
+If you want something you can copy/paste into your repo as a Phase 2 checklist, use this:
+
+ Add ingest report JSON + summary table
+
+ Save text_raw and text_clean; embed text_clean
+
+ Add chunk_type flags and TOC detection; skip embedding TOC
+
+ Add ask retrieval modes: global / balanced
+
+ Add rerank step: keyword first, optional LLM rerank
+
+ Ask prompt: per-manual coverage output
+
+ Add CLI: exam (topic → questions + model answers + evidence)
+
+ Add CLI: module (topic → consolidated module + citations)
+
+If you tell me which is your priority—exams or better multi-manual answers—I’ll give you the exact code sections to add (in a way that won’t break your current commands).
