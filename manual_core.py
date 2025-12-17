@@ -1661,20 +1661,22 @@ def show_chunk(chunk_id: str) -> None:
 def ingest(use_hierarchy: bool = True, max_chars: int = 1400, doc_type: Optional[str] = None):
     """
     Ingest manuals with enhanced metadata support.
-    Supports both SQLite (preferred) and legacy JSON format.
+    Phase-1 clean behavior:
+      • Manual-scoped chunk IDs
+      • Re-ingest replaces previous version cleanly
     """
+
     ensure_dirs()
-    
+
     # Initialize SQLite if not exists
     if not os.path.exists(SQLITE_DB_PATH):
         print("Initializing SQLite database...")
         init_sqlite_db()
-    
+
     use_sqlite_db = use_sqlite()
-    
-    # For backward compatibility, also maintain JSON
+
+    # Legacy JSON DB (kept for now)
     db = {"chunks": []}
-    cid = 0
 
     files = [f for f in os.listdir(MANUALS_DIR) if f.lower().endswith((".txt", ".md"))]
     if not files:
@@ -1685,97 +1687,93 @@ def ingest(use_hierarchy: bool = True, max_chars: int = 1400, doc_type: Optional
     for f in files:
         print(" •", f)
 
-    # Prepare for FAISS index
     all_embeddings = []
     all_chunk_ids = []
-    
+
     for fname in files:
         manual_id = os.path.splitext(fname)[0]
         path = os.path.join(MANUALS_DIR, fname)
 
         text = read_manual_file(path)
-        
-        # Auto-detect doc_type
         detected_doc_type = doc_type or detect_doc_type(fname, text)
-        
         text = clean_text_for_chunking(text)
 
         records = chunk_records(text, max_chars=max_chars, use_hierarchy=use_hierarchy)
         records = drop_bad_records(records)
 
         print(f"[{manual_id}] → {len(records)} chunks (doc_type: {detected_doc_type})")
-        
-        # Store document metadata in SQLite
+
+        # -----------------------------
+        # RE-INGEST BEHAVIOR (SAFE)
+        # -----------------------------
         if use_sqlite_db:
             conn = get_db_connection()
             cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO documents 
-                (manual_id, doc_type, file_path, ingested_at)
-                VALUES (?, ?, ?, ?)
-            ''', (manual_id, detected_doc_type, path, datetime.utcnow().isoformat()))
-            
+            cursor.execute("DELETE FROM chunks WHERE manual_id = ?", (manual_id,))
             conn.commit()
             conn.close()
-            
-            # Log audit event
-            log_audit_event("ingest_document", f"Ingested {manual_id} ({len(records)} chunks)")
+
+        # Manual-scoped chunk counter
+        local_cid = 0
+
+        # Store document metadata
+        if use_sqlite_db:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT OR REPLACE INTO documents
+                (manual_id, doc_type, file_path, ingested_at)
+                VALUES (?, ?, ?, ?)
+                ''',
+                (manual_id, detected_doc_type, path, datetime.utcnow().isoformat())
+            )
+            conn.commit()
+            conn.close()
 
         batch_size = 16
         for i in range(0, len(records), batch_size):
-            subrecs = records[i:i+batch_size]
+            subrecs = records[i:i + batch_size]
             subtexts = [r["text"] for r in subrecs]
             embs = embed_texts(subtexts)
 
             for r, emb in zip(subrecs, embs):
-                chunk_id = f"C{cid}"
-                
-                # Store in SQLite
+                chunk_id = f"{manual_id}::C{local_cid}"
+
                 if use_sqlite_db:
                     conn = get_db_connection()
                     cursor = conn.cursor()
-                    
-                    cursor.execute('''
-                        INSERT INTO chunks 
-                        (id, manual_id, text, heading, path, heading_num, level, 
+                    cursor.execute(
+                        '''
+                        INSERT INTO chunks
+                        (id, manual_id, text, heading, path, heading_num, level,
                          topic_id, is_emergency_procedure, emergency_category, units,
-                         diving_modes, physiology_tags, systems_tags, normative_language, conflict_qualifiers)
+                         diving_modes, physiology_tags, systems_tags,
+                         normative_language, conflict_qualifiers)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        chunk_id,
-                        manual_id,
-                        r["text"],
-                        r.get("heading", ""),
-                        r.get("path", ""),
-                        r.get("heading_num", ""),
-                        r.get("level", 0),
-                        r.get("topic_id", ""),
-                        1 if r.get("is_emergency_procedure", False) else 0,
-                        r.get("emergency_category"),
-                        json.dumps(r.get("units", [])),
-                        json.dumps(r.get("diving_modes", [])),
-                        json.dumps(r.get("physiology_tags", [])),
-                        json.dumps(r.get("systems_tags", [])),
-                        r.get("normative_language"),
-                        json.dumps(r.get("conflict_qualifiers", []))
-                    ))
-                    
+                        ''',
+                        (
+                            chunk_id,
+                            manual_id,
+                            r["text"],
+                            r.get("heading", ""),
+                            r.get("path", ""),
+                            r.get("heading_num", ""),
+                            r.get("level", 0),
+                            r.get("topic_id", ""),
+                            1 if r.get("is_emergency_procedure") else 0,
+                            r.get("emergency_category"),
+                            json.dumps(r.get("units", [])),
+                            json.dumps(r.get("diving_modes", [])),
+                            json.dumps(r.get("physiology_tags", [])),
+                            json.dumps(r.get("systems_tags", [])),
+                            r.get("normative_language"),
+                            json.dumps(r.get("conflict_qualifiers", [])),
+                        )
+                    )
                     conn.commit()
                     conn.close()
-                    
-                    # Register topic_id if not exists
-                    if r.get("topic_id"):
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute('''
-                            INSERT OR IGNORE INTO topics (topic_id, first_seen)
-                            VALUES (?, ?)
-                        ''', (r["topic_id"], datetime.utcnow().isoformat()))
-                        conn.commit()
-                        conn.close()
-                
-                # Also store in legacy JSON format for backward compatibility
+
                 db["chunks"].append({
                     "id": chunk_id,
                     "manual_id": manual_id,
@@ -1783,52 +1781,26 @@ def ingest(use_hierarchy: bool = True, max_chars: int = 1400, doc_type: Optional
                     "embedding": emb,
                     "heading": r.get("heading", ""),
                     "path": r.get("path", ""),
-                    "heading_num": r.get("heading_num", ""),
-                    "level": r.get("level", 0),
-                    "topic_id": r.get("topic_id", ""),
-                    "is_emergency_procedure": r.get("is_emergency_procedure", False),
-                    "emergency_category": r.get("emergency_category"),
-                    "units": r.get("units", []),
-                    # Phase 1.5 additions
-                    "diving_modes": r.get("diving_modes", []),
-                    "physiology_tags": r.get("physiology_tags", []),
-                    "systems_tags": r.get("systems_tags", []),
-                    "normative_language": r.get("normative_language"),
-                    "conflict_qualifiers": r.get("conflict_qualifiers", []),
                 })
-                
-                # Collect for FAISS index
+
                 all_embeddings.append(emb)
                 all_chunk_ids.append(chunk_id)
-                
-                cid += 1
-    
-    # Save FAISS index
+
+                local_cid += 1
+
     if faiss and all_embeddings:
         print("Building FAISS index...")
-        embeddings_array = np.array(all_embeddings, dtype='float32')
-        dimension = embeddings_array.shape[1]
-        
-        # Use IndexFlatIP for cosine similarity (after normalization)
-        index = faiss.IndexFlatIP(dimension)
-        
-        # Normalize vectors for cosine similarity
+        embeddings_array = np.array(all_embeddings, dtype="float32")
         faiss.normalize_L2(embeddings_array)
+        index = faiss.IndexFlatIP(embeddings_array.shape[1])
         index.add(embeddings_array)
-        
-        # Save index
         faiss.write_index(index, FAISS_INDEX_PATH)
-        
-        # Save chunk ID mapping
         with open(FAISS_INDEX_PATH + ".ids", "w") as f:
             json.dump(all_chunk_ids, f)
-        
-        print(f"FAISS index saved with {len(all_chunk_ids)} vectors")
 
-    # Save legacy JSON
     save_db(db)
     print(f"\nIngestion complete. Total chunks: {len(db['chunks'])}")
-    print(f"Storage: SQLite ({'✓' if use_sqlite_db else '✗'}), FAISS ({'✓' if faiss else '✗'})")
+
 
 
 # ============================================================
